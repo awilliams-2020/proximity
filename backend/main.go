@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -167,6 +168,7 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 
 	var input struct {
 		Name string `json:"name"`
+		IP   string `json:"ip"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -174,25 +176,27 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get IP from request
-	ip := r.RemoteAddr
-
 	// Validate IP address
-	validIP, err := validateIP(ip)
+	validIP, err := validateIP(input.IP)
 	if err != nil {
-		log.Printf("Invalid IP address: %s - %v", ip, err)
+		log.Printf("Invalid IP address: %s - %v", input.IP, err)
 		sendJSONError(w, http.StatusBadRequest, "Invalid IP address: "+err.Error())
 		return
 	}
 
-	// Log the remote address
-	log.Printf("Creating node for IP: %s, Name: %s", validIP, input.Name)
+	// Check if node with name already exists
+	var existingNodeWithName Node
+	if err := s.db.Where("name = ?", input.Name).First(&existingNodeWithName).Error; err == nil {
+		log.Printf("Node name already taken: %s", input.Name)
+		sendJSONError(w, http.StatusConflict, "Node name already taken")
+		return
+	}
 
 	// Check if node with IP already exists
-	var existingNode Node
-	if err := s.db.Where("ip = ?", validIP).First(&existingNode).Error; err == nil {
+	var existingNodeWithIP Node
+	if err := s.db.Where("ip = ?", validIP).First(&existingNodeWithIP).Error; err == nil {
 		log.Printf("Node already exists for IP: %s", validIP)
-		sendJSONError(w, http.StatusConflict, "Node already exists")
+		sendJSONError(w, http.StatusConflict, "IP node already exists")
 		return
 	}
 
@@ -237,11 +241,20 @@ func generateID() string {
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
+	// Get database configuration from environment variables
+	dbUser := getEnvOrDefault("DB_USER", "root")
+	dbPassword := getEnvOrDefault("DB_PASSWORD", "password")
+	dbHost := getEnvOrDefault("DB_HOST", "mariadb")
+	dbPort := getEnvOrDefault("DB_PORT", "3306")
+	dbName := getEnvOrDefault("DB_NAME", "ipnetwork")
+
 	// Connect to database
-	dsn := "appuser:apppassword@tcp(localhost:3306)/ipnetwork?charset=utf8mb4&parseTime=True&loc=Local"
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+		dbUser, dbPassword, dbHost, dbPort, dbName)
+	fmt.Println(dsn)
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatal("Failed to connect to database:", err)
+		log.Fatal("Failed to connect to database: ", err)
 	}
 
 	// Auto migrate the schema
@@ -252,7 +265,10 @@ func main() {
 
 	// Create router
 	mux := http.NewServeMux()
-	mux.HandleFunc("/nodes", func(w http.ResponseWriter, r *http.Request) {
+	
+	// API v1 routes
+	v1 := http.NewServeMux()
+	v1.HandleFunc("/nodes", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			server.handleGetNodes(w, r)
@@ -263,10 +279,23 @@ func main() {
 		}
 	})
 
+	v1.HandleFunc("/ip", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		server.handleGetIP(w, r)
+	})
+
+	// Mount v1 routes under /v1 prefix
+	mux.Handle("/v1/", http.StripPrefix("/v1", v1))
+
 	// Add CORS middleware
 	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedOrigins:   []string{"*"},
 		AllowCredentials: true,
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders:   []string{"*"},
 	})
 
 	// Start server
@@ -277,4 +306,50 @@ func main() {
 
 	log.Printf("Server is running on http://localhost:%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, c.Handler(mux)))
+}
+
+// getEnvOrDefault returns the value of the environment variable or a default value if not set
+func getEnvOrDefault(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
+}
+
+// handleGetIP handles the request to get the client's public IP
+func (s *Server) handleGetIP(w http.ResponseWriter, r *http.Request) {
+	// Get the X-Real-IP header first (set by nginx/proxy)
+	ip := r.Header.Get("X-Real-IP")
+	if ip == "" {
+		// Try X-Forwarded-For header
+		ip = r.Header.Get("X-Forwarded-For")
+		if ip != "" {
+			// If X-Forwarded-For contains multiple IPs, take the first one
+			ip = strings.Split(ip, ",")[0]
+		}
+	}
+	
+	// If no proxy headers, use RemoteAddr
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+
+	// Remove port if present
+	if strings.Contains(ip, ":") {
+		ip = strings.Split(ip, ":")[0]
+	}
+
+	// Validate the IP
+	validIP, err := validateIP(ip)
+	if err != nil {
+		log.Printf("Invalid IP from request: %s - %v", ip, err)
+		sendJSONError(w, http.StatusBadRequest, "Invalid IP address: "+err.Error())
+		return
+	}
+
+	// Return the IP
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"ip": validIP,
+	})
 }

@@ -1,4 +1,27 @@
 services:
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        - REACT_APP_API_URL=http://backend:8080
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    environment:
+      - DB_USER=appuser
+      - DB_PASSWORD=apppassword
+      - DB_HOST=mariadb
+      - DB_PORT=3306
+      - DB_NAME=ipnetwork
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mariadb
+
   mariadb:
     image: mariadb:10.11
     environment:

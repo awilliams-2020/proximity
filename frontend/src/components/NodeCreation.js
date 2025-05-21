@@ -4,16 +4,27 @@ import { Box, TextField, Button, Typography } from '@mui/material';
 function NodeCreation({ onCreateNode }) {
   const [name, setName] = useState('');
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (name.trim()) {
+      setIsSubmitting(true);
+      setError('');
       try {
         await onCreateNode(name.trim());
         setName('');
-        setError('');
       } catch (err) {
-        setError(err.message);
+        // Check for specific error messages
+        if (err.message.includes('Node name already taken')) {
+          setError('This name is already taken. Please choose a different name.');
+        } else if (err.message.includes('IP node already exists')) {
+          setError('A node with your IP address already exists.');
+        } else {
+          setError(err.message || 'Failed to create node. Please try again.');
+        }
+      } finally {
+        setIsSubmitting(false);
       }
     }
   };
@@ -39,6 +50,7 @@ function NodeCreation({ onCreateNode }) {
           placeholder="Enter node name"
           variant="outlined"
           error={!!error}
+          disabled={isSubmitting}
           sx={{
             flex: 1,
             '& .MuiOutlinedInput-root': {
@@ -51,9 +63,9 @@ function NodeCreation({ onCreateNode }) {
           variant="contained"
           color="primary"
           size="small"
-          disabled={!name.trim()}
+          disabled={!name.trim() || isSubmitting}
         >
-          Create Node
+          {isSubmitting ? 'Creating...' : 'Create Node'}
         </Button>
       </Box>
       {error && (
